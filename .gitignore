@@ -1,0 +1,5 @@
+src/daemonFuse/.vscode-ctags
+src/daemonFuse/build/
+src/serveurCurl/.vscode-ctags
+src/serveurCurl/.vscode/settings.json
+src/serveurCurl/build/

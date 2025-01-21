@@ -4,6 +4,8 @@
  */
 
 #include "actions.h"
+#include <sys/socket.h>
+
 
 int verifierNouvelleConnexion(struct requete reqList[], int maxlen, int socket){
     // Dans cette fonction, vous devez d'abord vérifier si le serveur peut traiter
@@ -22,6 +24,28 @@ int verifierNouvelleConnexion(struct requete reqList[], int maxlen, int socket){
     // Cette fonction doit retourner 0 si elle n'a pas acceptée de nouvelle connexion, ou 1 dans le cas contraire.
 
     // TODO
+
+    int index_to_place_socket;
+    if ((index_to_place_socket = nouvelleRequete(reqList, maxlen)) < 0) {
+        return 0; 
+    }
+
+    struct sockaddr_un client_addr;
+    socklen_t addrLen = sizeof(client_addr);
+
+    int client_socket = accept(socket, (struct sockaddr *)&client_addr, &addrLen);
+    if (client_socket < 0) {
+        if (errno != EAGAIN) 
+        {
+            perror("Erreur lors de l'acceptation d'une nouvelle connexion");
+            return 0;
+        }
+    }
+
+    reqList[index_to_place_socket].fdPipe = client_socket; 
+    reqList[index_to_place_socket].status = REQ_STATUS_LISTEN; 
+
+    return 1;
 }
 
 int traiterConnexions(struct requete reqList[], int maxlen){
@@ -98,6 +122,41 @@ int traiterConnexions(struct requete reqList[], int maxlen){
                     // le parent ou dans l'enfant, voyez man fork(2).
                     // TODO
 
+                    int pipefd[2];
+                    if (pipe(pipefd) == -1) {
+                        perror("Erreur lors de la création du pipe");
+                        exit(1);
+                    }
+
+                    pid_t pid = fork();
+                    if (pid == -1) {
+                        perror("Erreur lors du fork");
+                        exit(1);
+                    }
+
+                    if (pid == 0) {
+                        close(pipefd[0]);
+
+                        executerRequete(pipefd[1], buffer);
+
+                        close(pipefd[1]);
+
+                        exit(0); 
+                    } else { 
+                        close(pipefd[1]);
+
+                        reqList[i].pid = pid;
+                        reqList[i].fdPipe = pipefd[0];
+                        reqList[i].status = REQ_STATUS_INPROGRESS;
+
+                       if(VERBOSE){
+                           printf("Processus enfant créé avec PID : %d\n", pid);
+                           printf("Descripteur de fichier du pipe (lecture) : %d\n", reqList[i].fdPipe);
+                       }
+                    }
+
+                    free(buffer); // Libérer la mémoire allouée pour le buffer
+
                 }
             }
         }
@@ -131,4 +190,77 @@ int traiterTelechargements(struct requete reqList[], int maxlen){
     // Cette fonction doit retourner 0 si elle n'a lu aucune donnée supplémentaire, ou un nombre > 0 si c'est le cas.
 
     // TODO
+
+    int octetsTraites = 0;
+
+    fd_set setPipes;
+    struct timeval tInfo;
+    tInfo.tv_sec = 0;
+    tInfo.tv_usec = SLEEP_TIME;
+    int maxFileDescriptorPlusOne = 0;
+    FD_ZERO(&setPipes);
+
+    for(int i = 0; i < maxlen; ++i){
+        if(reqList[i].status == REQ_STATUS_INPROGRESS){
+            FD_SET(reqList[i].fdPipe, &setPipes);
+            maxFileDescriptorPlusOne = (maxFileDescriptorPlusOne < reqList[i].fdPipe+1) ? reqList[i].fdPipe+1 : maxFileDescriptorPlusOne;
+        }
+    }
+
+    if(maxFileDescriptorPlusOne){
+        int s = select(maxFileDescriptorPlusOne, &setPipes, NULL, NULL, &tInfo);
+        if(s > 0){
+            for(int i = 0; i < maxlen; ++i){
+                if(reqList[i].status == REQ_STATUS_INPROGRESS && FD_ISSET(reqList[i].fdPipe, &setPipes)){
+                    int tailleContenu;
+                    int lectureTotale = 0;
+                    int lectureCourante;
+
+                    if (read(reqList[i].fdPipe, &tailleContenu, sizeof(int)) != sizeof(int)) {
+                        perror("Erreur lors de la lecture de la taille du contenu depuis le pipe");
+                        close(reqList[i].fdPipe);
+                        // reqList[i].status = REQ_STATUS_ERROR;
+                        continue; // Passer à la requête suivante
+                    }
+
+
+                    reqList[i].buf = malloc(tailleContenu);
+                    if (reqList[i].buf == NULL) {
+                        perror("Erreur d'allocation de mémoire");
+                        exit(1);
+                    }
+
+                    // Lire le contenu
+                    while (lectureTotale < tailleContenu) {
+                        lectureCourante = read(reqList[i].fdPipe, reqList[i].buf + lectureTotale, tailleContenu - lectureTotale);
+                        if (lectureCourante == -1) {
+                            perror("Erreur lors de la lecture du contenu depuis le pipe");
+                            free(reqList[i].buf);
+                            close(reqList[i].fdPipe);
+                            // reqList[i].status = REQ_STATUS_ERROR;
+                            continue;
+                        }
+                        lectureTotale += lectureCourante;
+                    }
+
+
+                    reqList[i].len = tailleContenu;
+                    reqList[i].status = REQ_STATUS_READYTOSEND;
+
+                    // Attendre la fin du processus enfant et fermer le pipe
+                    int status;
+                    waitpid(reqList[i].pid, &status, 0);
+                    close(reqList[i].fdPipe);
+
+                    if(VERBOSE){
+                        printf("Téléchargement terminé pour le PID : %d\n", reqList[i].pid);
+                        printf("Taille du fichier téléchargé : %d octets\n", reqList[i].len);
+                    }
+                    octetsTraites++;
+                }
+            }
+        }
+    }
+
+    return octetsTraites;
 }
