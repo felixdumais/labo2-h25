@@ -36,8 +36,16 @@
                 "text": "-enable-pretty-printing",
                 "ignoreFailures": true
               },
+              {
+                "description": "Set follow-fork-mode to child",
+                "text": "set follow-fork-mode child"
+              },
+              {
+                "description": "Set detach-on-fork off",
+                "text": "set detach-on-fork off"
+              }
             ],
-            "preLaunchTask": "syncAndStartGDB" 
+            // "preLaunchTask": "syncAndStartGDB" 
         }
 
     ]

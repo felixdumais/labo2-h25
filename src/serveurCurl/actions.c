@@ -35,15 +35,21 @@ int verifierNouvelleConnexion(struct requete reqList[], int maxlen, int socket){
 
     int client_socket = accept(socket, (struct sockaddr *)&client_addr, &addrLen);
     if (client_socket < 0) {
-        if (errno != EAGAIN) 
-        {
+        if (errno == EAGAIN ) {
+            return 0;
+        } else {
             perror("Erreur lors de l'acceptation d'une nouvelle connexion");
             return 0;
         }
     }
+    printf("Nouvelle connection (fd %d)\n", client_socket);
 
-    reqList[index_to_place_socket].fdPipe = client_socket; 
+    reqList[index_to_place_socket].fdSocket = client_socket; 
     reqList[index_to_place_socket].status = REQ_STATUS_LISTEN; 
+    reqList[index_to_place_socket].pid = 0; 
+    reqList[index_to_place_socket].fdPipe = -1; 
+    reqList[index_to_place_socket].buf = NULL; 
+    reqList[index_to_place_socket].len = 0; 
 
     return 1;
 }
@@ -90,7 +96,7 @@ int traiterConnexions(struct requete reqList[], int maxlen){
 
                     // On lit les donnees sur le socket
                     if(VERBOSE)
-                        printf("Lecture de la requete sur le socket %i\n", reqList[i].fdSocket);
+                        printf("traiterConnexion(): Lecture de la requete sur le socket %i\n", reqList[i].fdSocket);
                     octetsTraites = read(reqList[i].fdSocket, buffer, sizeof(req));
                     if(octetsTraites == -1){
                         perror("Erreur en effectuant un read() sur un socket pret");
@@ -101,8 +107,8 @@ int traiterConnexions(struct requete reqList[], int maxlen){
                     buffer = realloc(buffer, sizeof(req) + req.sizePayload);
                     octetsTraites = read(reqList[i].fdSocket, buffer + sizeof(req), req.sizePayload);
                     if(VERBOSE){
-                        printf("\t%i octets lus au total\n", req.sizePayload + sizeof(req));
-                        printf("\tContenu de la requete : %s\n", buffer + sizeof(req));
+                        printf("traiterConnexion(): \t%i octets lus au total\n", req.sizePayload + sizeof(req));
+                        printf("traiterConnexion(): \tContenu de la requete : %s\n", buffer + sizeof(req));
                     }
 
                     // Ici, vous devez tout d'abord initialiser un nouveau pipe à l'aide de la fonction pipe()
@@ -135,6 +141,7 @@ int traiterConnexions(struct requete reqList[], int maxlen){
                     }
 
                     if (pid == 0) {
+                        printf("traiterConnexion(): Je suis le PID %d\n", pid);
                         close(pipefd[0]);
 
                         executerRequete(pipefd[1], buffer);
@@ -143,6 +150,7 @@ int traiterConnexions(struct requete reqList[], int maxlen){
 
                         exit(0); 
                     } else { 
+                        printf("traiterConnexion(): Je suis le PID %d\n", pid);
                         close(pipefd[1]);
 
                         reqList[i].pid = pid;
@@ -150,8 +158,8 @@ int traiterConnexions(struct requete reqList[], int maxlen){
                         reqList[i].status = REQ_STATUS_INPROGRESS;
 
                        if(VERBOSE){
-                           printf("Processus enfant créé avec PID : %d\n", pid);
-                           printf("Descripteur de fichier du pipe (lecture) : %d\n", reqList[i].fdPipe);
+                           printf("traiterConnexion(): Processus enfant créé avec PID : %d\n", pid);
+                           printf("traiterConnexion(): Descripteur de fichier du pipe (lecture) : %d\n", reqList[i].fdPipe);
                        }
                     }
 

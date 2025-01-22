@@ -50,6 +50,17 @@ void gererSignal(int signo) {
     // lorsque SIGUSR2 (et _seulement_ SIGUSR2) est reçu
     // TODO
 
+    if (signo == SIGUSR2) {
+        printf("\nStatistiques des tâches en cours:\n");
+        for (int i = 0; i < MAX_CONNEXIONS; i++) {
+            if (reqList[i].status != REQ_STATUS_INACTIVE) {
+                printf("Requête %d: Statut = %s, PID du processus enfant = %d\n",
+                       i, statusDesc[reqList[i].status], reqList[i].pid);
+            }
+        }
+        printf("\n");
+    }
+
 }
 
 
@@ -57,6 +68,9 @@ void gererSignal(int signo) {
 int main(int argc, char* argv[]){
     // Chemin du socket UNIX
     // Linux ne supporte pas un chemin de plus de 108 octets (voir man 7 unix)
+
+    setbuf(stdout, NULL);
+
     char path[108] = "/tmp/setrunixsocket";
     if(argc > 1)        // On peut également le passer en paramètre
         strncpy(path, argv[1], sizeof(path));
@@ -67,6 +81,17 @@ int main(int argc, char* argv[]){
 
     // TODO
     // Implémentez ici le code permettant d'attacher la fonction "gereSignal" au signal SIGUSR2
+
+    struct sigaction sa;
+    sa.sa_handler = gererSignal; 
+    sigemptyset(&sa.sa_mask);   
+    sa.sa_flags = 0;           
+
+    if (sigaction(SIGUSR2, &sa, NULL) == -1) {
+        perror("Erreur lors de l'attachement du signal SIGUSR2");
+        exit(1);
+    }
+    printf("Signal SIGUSR2 attache\n");
 
 
     // TODO
@@ -89,6 +114,7 @@ int main(int argc, char* argv[]){
         perror("socket failed!");
         exit(1);
     }
+    printf("Creation du socket reussie (fd %d)\n", sock);
 
     // TODO
     // 3) Utilisez fcntl() pour mettre le socket en mode non-bloquant
@@ -106,6 +132,7 @@ int main(int argc, char* argv[]){
         close(sock);
         exit(1);
     }
+    printf("Mode non bloquant actif\n");
 
     // TODO
     // 4) Faites un bind sur le socket
@@ -118,6 +145,8 @@ int main(int argc, char* argv[]){
         perror("bind failed!");
         exit(1);
     }
+    printf("Bind socket \n");
+
     // TODO
     // 5) Mettez le socket en mode écoute (listen), en acceptant un maximum de MAX_CONNEXIONS en attente
     //      Vérifiez si l'opération a été effectuée avec succès, sinon quittez le processus en affichant l'erreur
@@ -128,6 +157,7 @@ int main(int argc, char* argv[]){
         close(sock);
         exit(1);
     }
+    printf("Listen actif \n");
 
 
     // Initialisation du socket UNIX terminée!
