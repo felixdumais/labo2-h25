@@ -120,7 +120,18 @@ int main(int argc, char* argv[]){
     // 3) Utilisez fcntl() pour mettre le socket en mode non-bloquant
     //      Vérifiez si l'opération a été effectuée avec succès, sinon quittez le processus en affichant l'erreur
     //      Voyez man fcntl pour plus de détails sur le champ à modifier
-    int flags = fcntl(sock, F_GETFL, 0);
+
+
+    // FDM: fcntl manipule les fd (e.g. sock). Cette fonction permet le controle le comportement des fd.
+    // int fcntl(int fd, int op, ... /* arg */ );
+    // 1. On vient chercher le statut courant de sock
+    // 2. Ensuite on le met en mode non bloquant en ajoutant en ajoutant le bit O_NONBLOCK à l'int flags
+
+    // When dealing with sockets in Linux, non-blocking mode is a feature where socket operations do 
+    //  not force the program to wait (block) if the operation cannot be completed immediately. 
+    //  Instead, they return control to the program right away.
+    // After this, any operations (e.g., read, write, accept, connect, etc.) on the sock will follow non-blocking behavior.
+    int flags = fcntl(sock, F_GETFL, 0); 
     if (flags == -1) {
         perror("Erreur lors de la récupération des flags");
         close(sock);

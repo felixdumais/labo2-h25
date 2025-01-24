@@ -25,6 +25,8 @@ int verifierNouvelleConnexion(struct requete reqList[], int maxlen, int socket){
 
     // TODO
 
+
+    // FDM: 1. On regarde s'il y a une connexion de disponible
     int index_to_place_socket;
     if ((index_to_place_socket = nouvelleRequete(reqList, maxlen)) < 0) {
         return 0; 
@@ -33,10 +35,20 @@ int verifierNouvelleConnexion(struct requete reqList[], int maxlen, int socket){
     struct sockaddr_un client_addr;
     socklen_t addrLen = sizeof(client_addr);
 
+    //  FDM: int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
+    //  socket: est le socket qui ecoute les connexions (lui qu'on a créé dans le main)
+    //  client_addr l'endroit ou on va stocker l'adresse client
+    //  addrLen longueur de l'adresse client
+    //  On  success,  these  system  calls  return a file descriptor for the accepted socket (a nonnegative integer).  On error, -1 is re‐
+    //    turned, errno is set appropriately, and addrlen is left unchanged.  
+    //  1. Removes the first connection request from the backlog queue.
+    //  2. Creates a new socket (with a unique file descriptor).
+    //  3. Fills in the addr structure with the client’s information (if provided).
+    //  4. Returns the file descriptor for the new socket.
     int client_socket = accept(socket, (struct sockaddr *)&client_addr, &addrLen);
     if (client_socket < 0) {
         if (errno == EAGAIN ) {
-            return 0;
+            return 0; // Aucun client n'a demandé de connexion, on va reesayer plus tard
         } else {
             perror("Erreur lors de l'acceptation d'une nouvelle connexion");
             return 0;
@@ -141,17 +153,26 @@ int traiterConnexions(struct requete reqList[], int maxlen){
                     }
 
                     if (pid == 0) {
+                        // FDM: Le processus enfant va traiter les requetes individuelles et les transmettre au parent
                         printf("traiterConnexion(): Je suis le PID %d\n", pid);
+
+                        // FDM: l'enfant n'a pas besoin du bout de lecture, il doit écrire  
                         close(pipefd[0]);
 
+                        // FDM: Il écrit ici
                         executerRequete(pipefd[1], buffer);
 
+                        // FDM: On ferme la connexion
                         close(pipefd[1]);
 
                         exit(0); 
                     } else { 
                         printf("traiterConnexion(): Je suis le PID %d\n", pid);
+
+                        // FDM: Le parent n'a pas besoin d'écrire. 
                         close(pipefd[1]);
+
+                        // FDM: On sauvegarde le pid de l'enfant et le fd en lecture pour plus tard
 
                         reqList[i].pid = pid;
                         reqList[i].fdPipe = pipefd[0];
@@ -224,21 +245,31 @@ int traiterTelechargements(struct requete reqList[], int maxlen){
                     int lectureTotale = 0;
                     int lectureCourante;
 
+                    // FDM: Ici on lit la taille du buffer fournit par le processus enfant
                     if (read(reqList[i].fdPipe, &tailleContenu, sizeof(int)) != sizeof(int)) {
                         perror("Erreur lors de la lecture de la taille du contenu depuis le pipe");
                         close(reqList[i].fdPipe);
-                        // reqList[i].status = REQ_STATUS_ERROR;
-                        continue; // Passer à la requête suivante
+                        continue; 
                     }
 
-
+                    // FDM: On cree un buffer dans la heap pour mettre le contenu de ce que l'enfant va envoyer
                     reqList[i].buf = malloc(tailleContenu);
                     if (reqList[i].buf == NULL) {
                         perror("Erreur d'allocation de mémoire");
                         exit(1);
                     }
 
-                    // Lire le contenu
+                    // FDM: On lit le contenu par chunk
+                    // ssize_t read(int fd, void *buf, size_t count);
+                    // RETURN VALUE
+                    //    On success, the number of bytes read is returned (zero indicates end of
+                    //    file),  and the file position is advanced by this number.  It is not an
+                    //    error if this number is smaller than the  number  of  bytes  requested;
+                    //    this  may happen for example because fewer bytes are actually available
+                    //    right now (maybe because we were close to end-of-file,  or  because  we
+                    //    are reading from a pipe, or from a terminal), or because read() was in‐
+                    //    terrupted by a signal.  See also NOTES.
+
                     while (lectureTotale < tailleContenu) {
                         lectureCourante = read(reqList[i].fdPipe, reqList[i].buf + lectureTotale, tailleContenu - lectureTotale);
                         if (lectureCourante == -1) {
