@@ -84,16 +84,38 @@ void* setrfs_init(struct fuse_conn_info *conn){
 // lignes dans d'autres fonctions.
 static int setrfs_getattr(const char *path, struct stat *stbuf)
 {
-	// On récupère le contexte
-	struct fuse_context *context = fuse_get_context();
+    // On récupère le contexte
+    struct fuse_context *context = fuse_get_context();
 
-	// Si vous avez enregistré dans données dans setrfs_init, alors elles sont disponibles dans context->private_data
-	// Ici, voici un exemple où nous les utilisons pour donner le bon propriétaire au fichier (l'utilisateur courant)
-	stbuf->st_uid = context->uid;		// On indique l'utilisateur actuel comme proprietaire
-	stbuf->st_gid = context->gid;		// Idem pour le groupe
+    // On initialise la structure stat à zéro
+    memset(stbuf, 0, sizeof(struct stat));
 
-	// TODO
+    // Si vous avez enregistré des données dans setrfs_init, alors elles sont disponibles dans context->private_data
+    // Ici, voici un exemple où nous les utilisons pour donner le bon propriétaire au fichier (l'utilisateur courant)
+    stbuf->st_uid = context->uid;   // On indique l'utilisateur actuel comme proprietaire
+    stbuf->st_gid = context->gid;   // Idem pour le groupe
+
+    // On vérifie si le chemin est un dossier ou un fichier
+    if (strcmp(path, "/") == 0) {
+        stbuf->st_mode = S_IFDIR | 0777;  // Dossier avec toutes les permissions
+        stbuf->st_nlink = 2;
+    } else {
+        // On suppose que le fichier est ouvert si un descripteur de fichier est présent dans les données privées
+        struct cacheFichier *file = trouverFichier((struct cacheData*)context->private_data, path);
+        if (file && file->countOpen > 0 ) {
+            stbuf->st_mode = S_IFREG | 0777;  
+            stbuf->st_nlink = 1;
+            stbuf->st_size = file->len;  
+        } else {
+            stbuf->st_mode = S_IFREG | 0777;  
+            stbuf->st_nlink = 1;
+            stbuf->st_size = 104857601;  
+        }
+    }
+
+    return 0;
 }
+
 
 
 // Cette fonction est utilisée pour lister un dossier. Elle est déjà implémentée pour vous
@@ -193,7 +215,7 @@ static int setrfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 // Cette fonction est appelée lorsqu'un processus ouvre un fichier. Dans ce cas-ci, vous devez :
 // 1) si le fichier est déjà dans le cache, retourner avec succès en mettant à jour le file handle (champ fh)
 //		dans la structure fuse_file_info
-// 2) si le fichier n'est pas dans le cas, envoyer une requête au serveur pour le télécharger, puis l'insérer dans
+// 2) si le fichier n'est pas dans le cache, envoyer une requête au serveur pour le télécharger, puis l'insérer dans
 //		le cache et effectuer l'étape 1).
 // 3) il se peut que le fichier n'existe tout simplement pas. Dans ce cas, vous devez renvoyer le code d'erreur approprié.
 //
@@ -210,7 +232,72 @@ static int setrfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 // énoncées plus haut. Rappelez-vous en particulier qu'un pointeur est unique...
 static int setrfs_open(const char *path, struct fuse_file_info *fi)
 {
-		// TODO
+	// TODO
+	
+	printf("setrfs_open : %s\n", path);
+
+	struct fuse_context *context = fuse_get_context();
+	struct cacheData *cache = (struct cacheData*)context->private_data;
+	struct cacheFichier *file = trouverFichier(cache, path);
+	if (!file)
+	{
+		int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+		if(sock == -1){
+			perror("Impossible d'initialiser le socket UNIX");
+			return -1;
+		}
+
+		// Ecriture des parametres du socket
+		struct sockaddr_un sockInfo;
+		memset(&sockInfo, 0, sizeof(sockInfo));
+		sockInfo.sun_family = AF_UNIX;
+		strncpy(sockInfo.sun_path, unixSockPath, sizeof(sockInfo.sun_path) - 1);
+
+		// Connexion
+		if(connect(sock, (const struct sockaddr *) &sockInfo, sizeof(sockInfo)) < 0){
+			perror("Erreur connect");
+			exit(1);
+		}
+
+		// Formatage et envoi de la requete
+		//size_t len = strlen() + 1;		// +1 pour le caractere NULL de fin de chaine
+		struct msgReq req;
+		req.type = REQ_READ;
+		req.sizePayload = 0;
+		int octetsTraites = envoyerMessage(sock, &req, NULL);
+
+		// On attend et on recoit le fichier demande
+		struct msgRep rep;
+		octetsTraites = read(sock, &rep, sizeof(rep));
+		if(octetsTraites == -1){
+			perror("Erreur en effectuant un read() sur un socket pret");
+			exit(1);
+		}
+		if(VERBOSE)	
+			printf("Lecture de l'en-tete de la reponse sur le socket %i\n", sock);
+
+		pthread_mutex_lock(&(cache->mutex));
+
+		struct cacheFichier *current_file = (struct cacheFichier*)malloc(sizeof(struct cacheFichier));
+
+		current_file->nom = (char*)path;
+
+		// cache->rootDirIndex = malloc(rep.sizePayload + 1);
+		// cache->rootDirIndex[rep.sizePayload] = 0;		// On s'assure d'avoir le caractere nul a la fin de la chaine
+		unsigned int totalRecu = 0;
+		// Il se peut qu'on ait a faire plusieurs lectures si le fichier est gros
+		while(totalRecu < rep.sizePayload){
+			octetsTraites = read(sock, current_file->data + totalRecu, rep.sizePayload - totalRecu);
+			totalRecu += octetsTraites;
+		}
+
+		insererFichier(cache, current_file);
+
+		pthread_mutex_unlock(&(cache->mutex));
+	}
+
+
+    return 0;
 }
 
 

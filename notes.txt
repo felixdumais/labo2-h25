@@ -1,0 +1,4 @@
+- Quand tu call select tu es en IOWAIT
+- Si des données arrivent, il va regarder s'il y a des process qui attendent le data.
+- Ordonanceur ne sait quand les process sont bloqués ou pas. Il sait juste s'ils sont prêt ou pas
+- Voir select vs poll 
