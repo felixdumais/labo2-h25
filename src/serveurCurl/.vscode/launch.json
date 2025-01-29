@@ -45,7 +45,7 @@
                 "text": "set detach-on-fork off"
               }
             ],
-            // "preLaunchTask": "syncAndStartGDB" 
+            "preLaunchTask": "syncAndStartGDB" 
         }
 
     ]

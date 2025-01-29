@@ -239,63 +239,80 @@ static int setrfs_open(const char *path, struct fuse_file_info *fi)
 	struct fuse_context *context = fuse_get_context();
 	struct cacheData *cache = (struct cacheData*)context->private_data;
 	struct cacheFichier *file = trouverFichier(cache, path);
-	if (!file)
-	{
-		int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-		if(sock == -1){
-			perror("Impossible d'initialiser le socket UNIX");
-			return -1;
-		}
 
-		// Ecriture des parametres du socket
-		struct sockaddr_un sockInfo;
-		memset(&sockInfo, 0, sizeof(sockInfo));
-		sockInfo.sun_family = AF_UNIX;
-		strncpy(sockInfo.sun_path, unixSockPath, sizeof(sockInfo.sun_path) - 1);
+	if (file) {
+        // Fichier déjà en cache, on met à jour le file handle et retourne
+        fi->fh = (uintptr_t) file;
+        return 0;
+    }
 
-		// Connexion
-		if(connect(sock, (const struct sockaddr *) &sockInfo, sizeof(sockInfo)) < 0){
-			perror("Erreur connect");
-			exit(1);
-		}
-
-		// Formatage et envoi de la requete
-		//size_t len = strlen() + 1;		// +1 pour le caractere NULL de fin de chaine
-		struct msgReq req;
-		req.type = REQ_READ;
-		req.sizePayload = 0;
-		int octetsTraites = envoyerMessage(sock, &req, NULL);
-
-		// On attend et on recoit le fichier demande
-		struct msgRep rep;
-		octetsTraites = read(sock, &rep, sizeof(rep));
-		if(octetsTraites == -1){
-			perror("Erreur en effectuant un read() sur un socket pret");
-			exit(1);
-		}
-		if(VERBOSE)	
-			printf("Lecture de l'en-tete de la reponse sur le socket %i\n", sock);
-
-		pthread_mutex_lock(&(cache->mutex));
-
-		struct cacheFichier *current_file = (struct cacheFichier*)malloc(sizeof(struct cacheFichier));
-
-		current_file->nom = (char*)path;
-
-		// cache->rootDirIndex = malloc(rep.sizePayload + 1);
-		// cache->rootDirIndex[rep.sizePayload] = 0;		// On s'assure d'avoir le caractere nul a la fin de la chaine
-		unsigned int totalRecu = 0;
-		// Il se peut qu'on ait a faire plusieurs lectures si le fichier est gros
-		while(totalRecu < rep.sizePayload){
-			octetsTraites = read(sock, current_file->data + totalRecu, rep.sizePayload - totalRecu);
-			totalRecu += octetsTraites;
-		}
-
-		insererFichier(cache, current_file);
-
-		pthread_mutex_unlock(&(cache->mutex));
+	int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	if(sock == -1){
+		perror("Impossible d'initialiser le socket UNIX");
+		return -1;
 	}
 
+	// Ecriture des parametres du socket
+	struct sockaddr_un sockInfo = {0};
+	sockInfo.sun_family = AF_UNIX;
+	strncpy(sockInfo.sun_path, unixSockPath, sizeof(sockInfo.sun_path) - 1);
+
+	// Connexion
+	if(connect(sock, (const struct sockaddr *) &sockInfo, sizeof(sockInfo)) < 0){
+		perror("Erreur connect");
+        close(sock);
+        return -EIO;	
+	}
+
+	// Formatage et envoi de la requete
+	//size_t len = strlen() + 1;		// +1 pour le caractere NULL de fin de chaine
+	struct msgReq req;
+	req.type = REQ_READ;
+	req.sizePayload = strlen(path) + 1;
+	int octetsTraites = envoyerMessage(sock, &req, (char*)path);
+
+	// On attend et on recoit le fichier demande
+	struct msgRep rep;
+	octetsTraites = read(sock, &rep, sizeof(rep));
+
+	if (rep.sizePayload == 0){
+        close(sock);
+        return -ENOENT;
+	}
+
+	if(octetsTraites == -1){
+		perror("Erreur en effectuant un read() sur un socket pret");
+		exit(1);
+	}
+	if(VERBOSE)	
+		printf("Lecture de l'en-tete de la reponse sur le socket %i\n", sock);
+
+	pthread_mutex_lock(&(cache->mutex));
+
+    file = malloc(sizeof(struct cacheFichier));
+    if (!file) {
+        perror("Échec d'allocation du cacheFichier");
+        close(sock);
+        return -ENOMEM;
+    }
+    
+    file->nom = strdup(path);
+    file->data = calloc(rep.sizePayload + 1, sizeof(char));
+    file->len = rep.sizePayload;
+
+	unsigned int totalRecu = 0;
+
+	while(totalRecu < rep.sizePayload){
+		octetsTraites = read(sock, file->data + totalRecu, rep.sizePayload - totalRecu);
+		totalRecu += octetsTraites;
+	}
+
+	insererFichier(cache, file);
+
+	pthread_mutex_unlock(&(cache->mutex));
+
+
+    fi->fh = (uintptr_t) file;
 
     return 0;
 }
@@ -321,7 +338,23 @@ static int setrfs_open(const char *path, struct fuse_file_info *fi)
 static int setrfs_read(const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
-		// TODO
+	struct cacheFichier *file = (struct cacheFichier*)(uintptr_t)fi->fh;   
+	if (!file) {
+        return -ENOENT;
+    }
+
+    size_t remaining_size = file->len - offset;
+    if (size > remaining_size) {
+        size = remaining_size;
+    }
+
+    // Copier les données du cache vers le buffer (à adapter selon votre mécanisme de cache)
+    memcpy(buf, file->data + offset, size);
+
+    // Mettre à jour le pointeur de position dans le fichier
+    file->offset += size;
+
+    return size;
 }
 
 
@@ -330,8 +363,14 @@ static int setrfs_read(const char *path, char *buf, size_t size, off_t offset,
 // utilisée pour stocker ce fichier (pensez au buffer contenant son cache, son nom, etc.)
 static int setrfs_release(const char *path, struct fuse_file_info *fi)
 {
-		// TODO
+	struct fuse_context *context = fuse_get_context();
+	struct cacheData *cache = (struct cacheData*)context->private_data;
+	struct cacheFichier *file = (struct cacheFichier*)(uintptr_t)fi->fh;   
+
+	retirerFichier(cache, file);
+
 }
+
 
 
 ///////////////////////////////////////
