@@ -50,8 +50,17 @@ void gererSignal(int signo) {
     // lorsque SIGUSR2 (et _seulement_ SIGUSR2) est reçu
     // TODO
 
+    int counter = 0;
     if (signo == SIGUSR2) {
-        printf("\nStatistiques des tâches en cours:\n");
+        printf("\nINFORMATIONS SUR LES CONNEXIONS EN COURS\n");
+        for (int i = 0; i < MAX_CONNEXIONS; i++) {
+            if (reqList[i].status != REQ_STATUS_INACTIVE) {
+                counter++;
+            }
+        }
+
+        printf("\n%d connexions actives sur un maximum de %d\n", counter, MAX_CONNEXIONS);
+
         for (int i = 0; i < MAX_CONNEXIONS; i++) {
             if (reqList[i].status != REQ_STATUS_INACTIVE) {
                 printf("Requête %d: Statut = %s, PID du processus enfant = %d\n",
