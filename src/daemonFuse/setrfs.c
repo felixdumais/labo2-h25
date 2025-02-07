@@ -241,6 +241,9 @@ static int setrfs_open(const char *path, struct fuse_file_info *fi)
 
 	struct fuse_context *context = fuse_get_context();
 	struct cacheData *cache = (struct cacheData*)context->private_data;
+
+	// FDM: On empêche l'acces au fichier par plusieurs threads pour eviter de corrompre file->data
+	pthread_mutex_lock(&(cache->mutex));
 	struct cacheFichier *file = trouverFichier(cache, path);
 
 	// FDM: 1) retourner avec succès en mettant à jour le file handle
@@ -248,13 +251,14 @@ static int setrfs_open(const char *path, struct fuse_file_info *fi)
         // Fichier déjà en cache, on met à jour le file handle et retourne
         file->countOpen += 1;
 		fi->fh = (uintptr_t) file;
-
+		pthread_mutex_unlock(&(cache->mutex));
         return 0;
     }
 
 	int sock = socket(AF_UNIX, SOCK_STREAM, 0);
 	if(sock == -1){
 		perror("Impossible d'initialiser le socket UNIX");
+		pthread_mutex_unlock(&(cache->mutex));
 		return -1;
 	}
 
@@ -267,6 +271,7 @@ static int setrfs_open(const char *path, struct fuse_file_info *fi)
 	if(connect(sock, (const struct sockaddr *) &sockInfo, sizeof(sockInfo)) < 0){
 		perror("Erreur connect");
         close(sock);
+		pthread_mutex_unlock(&(cache->mutex));
         return -EIO;	
 	}
 
@@ -284,24 +289,24 @@ static int setrfs_open(const char *path, struct fuse_file_info *fi)
 	// FDM: 3) le fichier n'existe pas si le rep.sizePayload est 0, on retourne -ENOENT
 	if (rep.sizePayload == 0){
         close(sock);
+		pthread_mutex_unlock(&(cache->mutex));
         return -ENOENT; // FDM: /* No such file or directory */
 	}
 
 	if(octetsTraites == -1){
 		perror("Erreur en effectuant un read() sur un socket pret");
+		pthread_mutex_unlock(&(cache->mutex));
 		exit(1);
 	}
 	if(VERBOSE)	
 		printf("Lecture de l'en-tete de la reponse sur le socket %i\n", sock);
 
-	
-	// FDM: On empêche l'acces au fichier par plusieurs threads pour eviter de corrompre file->data
-	pthread_mutex_lock(&(cache->mutex));
 
     file = malloc(sizeof(struct cacheFichier));
     if (!file) {
         perror("Échec d'allocation du cacheFichier");
         close(sock);
+		pthread_mutex_unlock(&(cache->mutex));
         return -ENOMEM;
     }
     
@@ -349,12 +354,13 @@ static int setrfs_read(const char *path, char *buf, size_t size, off_t offset,
 {
 	struct fuse_context *context = fuse_get_context();
 	struct cacheData *cache = (struct cacheData*)context->private_data;
-		
-	pthread_mutex_lock(&(cache->mutex));
-	struct cacheFichier *file = (struct cacheFichier*)(uintptr_t)fi->fh;   
+	struct cacheFichier *file = (struct cacheFichier*)(uintptr_t)fi->fh;  
+	 
 	if (!file) {
         return -ENOENT;
     }
+
+	pthread_mutex_lock(&(cache->mutex));
 
     size_t remaining_size = file->len - offset;
     if (size > remaining_size) {

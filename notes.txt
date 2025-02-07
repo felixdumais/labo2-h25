@@ -6,3 +6,9 @@
 31 janvier 2025:
 
 Notes 
+
+Questions:
+
+- pas certain de comprendre ce qu'on doit retourner quand le serveur n'est pas parti
+- quand il y a plusieurs accès ça ne semble pas être full parallèle
+- 
