@@ -4,6 +4,8 @@
  */
 
 #include "actions.h"
+#include <sys/socket.h>
+
 
 int verifierNouvelleConnexion(struct requete reqList[], int maxlen, int socket){
     // Dans cette fonction, vous devez d'abord vérifier si le serveur peut traiter
@@ -22,6 +24,46 @@ int verifierNouvelleConnexion(struct requete reqList[], int maxlen, int socket){
     // Cette fonction doit retourner 0 si elle n'a pas acceptée de nouvelle connexion, ou 1 dans le cas contraire.
 
     // TODO
+
+
+    // FDM: 1. On regarde s'il y a une connexion de disponible
+    int index_to_place_socket;
+    if ((index_to_place_socket = nouvelleRequete(reqList, maxlen)) < 0) {
+        return 0; 
+    }
+
+    struct sockaddr_un client_addr;
+    socklen_t addrLen = sizeof(client_addr);
+
+    //  FDM: int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
+    //  socket: est le socket qui ecoute les connexions (lui qu'on a créé dans le main)
+    //  client_addr l'endroit ou on va stocker l'adresse client
+    //  addrLen longueur de l'adresse client
+    //  On  success,  these  system  calls  return a file descriptor for the accepted socket (a nonnegative integer).  On error, -1 is re‐
+    //    turned, errno is set appropriately, and addrlen is left unchanged.  
+    //  1. Removes the first connection request from the backlog queue.
+    //  2. Creates a new socket (with a unique file descriptor).
+    //  3. Fills in the addr structure with the client’s information (if provided).
+    //  4. Returns the file descriptor for the new socket.
+    int client_socket = accept(socket, (struct sockaddr *)&client_addr, &addrLen);
+    if (client_socket < 0) {
+        if (errno == EAGAIN ) {
+            return 0; // Aucun client n'a demandé de connexion, on va reesayer plus tard
+        } else {
+            perror("Erreur lors de l'acceptation d'une nouvelle connexion");
+            return 0;
+        }
+    }
+    printf("Nouvelle connection (fd %d)\n", client_socket);
+
+    reqList[index_to_place_socket].fdSocket = client_socket; 
+    reqList[index_to_place_socket].status = REQ_STATUS_LISTEN; 
+    reqList[index_to_place_socket].pid = 0; 
+    reqList[index_to_place_socket].fdPipe = -1; 
+    reqList[index_to_place_socket].buf = NULL; 
+    reqList[index_to_place_socket].len = 0; 
+
+    return 1;
 }
 
 int traiterConnexions(struct requete reqList[], int maxlen){
@@ -56,6 +98,12 @@ int traiterConnexions(struct requete reqList[], int maxlen){
     if(maxFileDescriptorPlusOne){
         // Au moins un socket est en attente d'une requête
         // select attend comme premier argument le descripteur de fichier ayant la valeur maximale plus 1
+        // FDM:
+        //     select()  allows  a program to monitor multiple file descriptors, waiting until one or more of the file descriptors become "ready"
+        //    for some class of I/O operation (e.g., input possible).  A file descriptor is considered ready if it is possible to perform a cor‐
+        //    responding I/O operation (e.g., read(2), or a sufficiently small write(2)) without blocking.
+        //        nfds   This argument should be set to the highest-numbered file descriptor in any of the three sets, plus 1.  The  indicated  file
+        //   descriptors in each set are checked, up to this limit (but see BUGS).
         int s = select(maxFileDescriptorPlusOne, &setSockets, NULL, NULL, &tInfo);
         if(s > 0){
             // Au moins un socket est prêt à être lu
@@ -66,7 +114,7 @@ int traiterConnexions(struct requete reqList[], int maxlen){
 
                     // On lit les donnees sur le socket
                     if(VERBOSE)
-                        printf("Lecture de la requete sur le socket %i\n", reqList[i].fdSocket);
+                        printf("traiterConnexion(): Lecture de la requete sur le socket %i\n", reqList[i].fdSocket);
                     octetsTraites = read(reqList[i].fdSocket, buffer, sizeof(req));
                     if(octetsTraites == -1){
                         perror("Erreur en effectuant un read() sur un socket pret");
@@ -77,8 +125,8 @@ int traiterConnexions(struct requete reqList[], int maxlen){
                     buffer = realloc(buffer, sizeof(req) + req.sizePayload);
                     octetsTraites = read(reqList[i].fdSocket, buffer + sizeof(req), req.sizePayload);
                     if(VERBOSE){
-                        printf("\t%i octets lus au total\n", req.sizePayload + sizeof(req));
-                        printf("\tContenu de la requete : %s\n", buffer + sizeof(req));
+                        printf("traiterConnexion(): \t%i octets lus au total\n", req.sizePayload + sizeof(req));
+                        printf("traiterConnexion(): \tContenu de la requete : %s\n", buffer + sizeof(req));
                     }
 
                     // Ici, vous devez tout d'abord initialiser un nouveau pipe à l'aide de la fonction pipe()
@@ -97,6 +145,53 @@ int traiterConnexions(struct requete reqList[], int maxlen){
                     // Pour plus d'informations sur la fonction fork() et sur la manière de détecter si vous êtes dans
                     // le parent ou dans l'enfant, voyez man fork(2).
                     // TODO
+
+                    int pipefd[2];
+                    if (pipe(pipefd) == -1) {
+                        perror("Erreur lors de la création du pipe");
+                        exit(1);
+                    }
+
+                    pid_t pid = fork();
+                    if (pid == -1) {
+                        perror("Erreur lors du fork");
+                        exit(1);
+                    }
+
+                    if (pid == 0) {
+                        // FDM: Le processus enfant va traiter les requetes individuelles et les transmettre au parent
+                        printf("traiterConnexion(): Je suis le PID %d\n", pid);
+
+                        // FDM: l'enfant n'a pas besoin du bout de lecture, il doit écrire  
+                        close(pipefd[0]);
+
+                        // FDM: Il écrit ici
+                        executerRequete(pipefd[1], buffer);
+
+                        // FDM: On ferme la connexion
+                        close(pipefd[1]);
+
+
+                        exit(0); 
+                    } else { 
+                        printf("traiterConnexion(): Je suis le PID %d\n", pid);
+
+                        // FDM: Le parent n'a pas besoin d'écrire. 
+                        close(pipefd[1]);
+
+                        // FDM: On sauvegarde le pid de l'enfant et le fd en lecture pour plus tard
+
+                        reqList[i].pid = pid;
+                        reqList[i].fdPipe = pipefd[0];
+                        reqList[i].status = REQ_STATUS_INPROGRESS;
+
+                       if(VERBOSE){
+                           printf("traiterConnexion(): Processus enfant créé avec PID : %d\n", pid);
+                           printf("traiterConnexion(): Descripteur de fichier du pipe (lecture) : %d\n", reqList[i].fdPipe);
+                       }
+                    }
+
+                    free(buffer); // Libérer la mémoire allouée pour le buffer
 
                 }
             }
@@ -131,4 +226,89 @@ int traiterTelechargements(struct requete reqList[], int maxlen){
     // Cette fonction doit retourner 0 si elle n'a lu aucune donnée supplémentaire, ou un nombre > 0 si c'est le cas.
 
     // TODO
+
+    int counter = 0;
+
+    fd_set setPipes;
+    struct timeval tInfo;
+    tInfo.tv_sec = 0;
+    tInfo.tv_usec = SLEEP_TIME;
+    int maxFileDescriptorPlusOne = 0;
+    FD_ZERO(&setPipes);
+
+    for(int i = 0; i < maxlen; ++i){
+        if(reqList[i].status == REQ_STATUS_INPROGRESS){
+            FD_SET(reqList[i].fdPipe, &setPipes);
+            maxFileDescriptorPlusOne = (maxFileDescriptorPlusOne < reqList[i].fdPipe+1) ? reqList[i].fdPipe+1 : maxFileDescriptorPlusOne;
+        }
+    }
+
+    if(maxFileDescriptorPlusOne){
+        int s = select(maxFileDescriptorPlusOne, &setPipes, NULL, NULL, &tInfo);
+        if(s > 0){
+            for(int i = 0; i < maxlen; ++i){
+                if(reqList[i].status == REQ_STATUS_INPROGRESS && FD_ISSET(reqList[i].fdPipe, &setPipes)){
+                    int tailleContenu;
+                    int lectureTotale = 0;
+                    int lectureCourante;
+
+                    // FDM: Ici on lit la taille du buffer fournit par le processus enfant
+                    if (read(reqList[i].fdPipe, &tailleContenu, sizeof(int)) != sizeof(int)) {
+                        perror("Erreur lors de la lecture de la taille du contenu depuis le pipe");
+                        close(reqList[i].fdPipe);
+                        continue; 
+                    }
+
+                    // FDM: On cree un buffer dans la heap pour mettre le contenu de ce que l'enfant va envoyer
+                    reqList[i].buf = malloc(tailleContenu);
+                    if (reqList[i].buf == NULL) {
+                        perror("Erreur d'allocation de mémoire");
+                        exit(1);
+                    }
+
+                    // FDM: On lit le contenu par chunk
+                    // ssize_t read(int fd, void *buf, size_t count);
+                    // RETURN VALUE
+                    //    On success, the number of bytes read is returned (zero indicates end of
+                    //    file),  and the file position is advanced by this number.  It is not an
+                    //    error if this number is smaller than the  number  of  bytes  requested;
+                    //    this  may happen for example because fewer bytes are actually available
+                    //    right now (maybe because we were close to end-of-file,  or  because  we
+                    //    are reading from a pipe, or from a terminal), or because read() was in‐
+                    //    terrupted by a signal.  See also NOTES.
+
+                    while (lectureTotale < tailleContenu) {
+                        lectureCourante = read(reqList[i].fdPipe, reqList[i].buf + lectureTotale, tailleContenu - lectureTotale);
+                        if (lectureCourante == -1) {
+                            perror("Erreur lors de la lecture du contenu depuis le pipe");
+                            free(reqList[i].buf);
+                            lectureCourante = 0;
+                            break;
+                        }
+                        lectureTotale += lectureCourante;
+                    }
+
+
+                    reqList[i].len = tailleContenu;
+                    reqList[i].status = REQ_STATUS_READYTOSEND;
+
+                    // Attendre la fin du processus enfant et fermer le pipe
+                    int status;
+                    waitpid(reqList[i].pid, &status, 0);
+                    close(reqList[i].fdPipe);
+
+                    if(VERBOSE){
+                        printf("Téléchargement terminé pour le PID : %d\n", reqList[i].pid);
+                        printf("Taille du fichier téléchargé : %d octets\n", reqList[i].len);
+                    }
+                    if (lectureTotale > 0)
+                    {
+                        counter++;
+                    }
+                }
+            }
+        }
+    }
+
+    return counter;
 }

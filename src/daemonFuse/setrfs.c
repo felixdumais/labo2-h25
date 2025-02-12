@@ -51,6 +51,8 @@ const char unixSockPath[] = "/tmp/setrunixsocket";
 // Cette fonction initialise le cache et l'insère dans le contexte de FUSE, qui sera
 // accessible à toutes les autres fonctions.
 // Elle est déjà implémentée pour vous, mais vous pouvez la modifier au besoin.
+
+// FDM: Tout ce data va être accessible dans context->private_data
 void* setrfs_init(struct fuse_conn_info *conn){
 	struct cacheData cache;
 	cache.rootDirIndex = NULL;
@@ -84,16 +86,39 @@ void* setrfs_init(struct fuse_conn_info *conn){
 // lignes dans d'autres fonctions.
 static int setrfs_getattr(const char *path, struct stat *stbuf)
 {
-	// On récupère le contexte
-	struct fuse_context *context = fuse_get_context();
+    // On récupère le contexte
+    struct fuse_context *context = fuse_get_context();
 
-	// Si vous avez enregistré dans données dans setrfs_init, alors elles sont disponibles dans context->private_data
-	// Ici, voici un exemple où nous les utilisons pour donner le bon propriétaire au fichier (l'utilisateur courant)
-	stbuf->st_uid = context->uid;		// On indique l'utilisateur actuel comme proprietaire
-	stbuf->st_gid = context->gid;		// Idem pour le groupe
+    // FDM: On initialise la structure stat à zéro
+    memset(stbuf, 0, sizeof(struct stat));
 
-	// TODO
+    // Si vous avez enregistré des données dans setrfs_init, alors elles sont disponibles dans context->private_data
+    // Ici, voici un exemple où nous les utilisons pour donner le bon propriétaire au fichier (l'utilisateur courant)
+    stbuf->st_uid = context->uid;   // On indique l'utilisateur actuel comme proprietaire
+    stbuf->st_gid = context->gid;   // Idem pour le groupe
+
+    // On vérifie si le chemin est un dossier ou un fichier
+    if (strcmp(path, "/") == 0) {
+        stbuf->st_mode = S_IFDIR | S_IRWXU | S_IRWXG | S_IRWXO;  // FDM: Dossier avec toutes les permissions 
+        stbuf->st_nlink = 2; // FDM: Nombre de de hard link à ce fichier (lui et .. (le préceédent))
+    } else {
+		/* FDM: Si le fichier n'est pas NULL et qu'il a été ouvert au moins une fois,
+			le champs file->len a été rempli (voir la fonction setrfs_open) */
+        struct cacheFichier *file = trouverFichier((struct cacheData*)context->private_data, path);
+        if (file && file->countOpen > 0 ) {
+            stbuf->st_mode = S_IFREG | S_IRWXU | S_IRWXG | S_IRWXO; 
+            stbuf->st_nlink = 1; // FDM: Nombre de de hard link à ce fichier
+            stbuf->st_size = file->len;  
+        } else {
+            stbuf->st_mode = S_IFREG | S_IRWXU | S_IRWXG | S_IRWXO;  
+            stbuf->st_nlink = 1;
+            stbuf->st_size = 104857601; // Valeur maximum du fichier100Mo
+        }
+    }
+
+    return 0;
 }
+
 
 
 // Cette fonction est utilisée pour lister un dossier. Elle est déjà implémentée pour vous
@@ -193,7 +218,7 @@ static int setrfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 // Cette fonction est appelée lorsqu'un processus ouvre un fichier. Dans ce cas-ci, vous devez :
 // 1) si le fichier est déjà dans le cache, retourner avec succès en mettant à jour le file handle (champ fh)
 //		dans la structure fuse_file_info
-// 2) si le fichier n'est pas dans le cas, envoyer une requête au serveur pour le télécharger, puis l'insérer dans
+// 2) si le fichier n'est pas dans le cache, envoyer une requête au serveur pour le télécharger, puis l'insérer dans
 //		le cache et effectuer l'étape 1).
 // 3) il se peut que le fichier n'existe tout simplement pas. Dans ce cas, vous devez renvoyer le code d'erreur approprié.
 //
@@ -210,7 +235,100 @@ static int setrfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 // énoncées plus haut. Rappelez-vous en particulier qu'un pointeur est unique...
 static int setrfs_open(const char *path, struct fuse_file_info *fi)
 {
-		// TODO
+	// TODO
+	
+	printf("setrfs_open : %s\n", path);
+
+	struct fuse_context *context = fuse_get_context();
+	struct cacheData *cache = (struct cacheData*)context->private_data;
+
+	// FDM: On empêche l'acces au fichier par plusieurs threads pour eviter de corrompre file->data
+	pthread_mutex_lock(&(cache->mutex));
+	struct cacheFichier *file = trouverFichier(cache, path);
+
+	// FDM: 1) retourner avec succès en mettant à jour le file handle
+	if (file) {
+        // Fichier déjà en cache, on met à jour le file handle et retourne
+        file->countOpen += 1;
+		fi->fh = (uintptr_t) file;
+		pthread_mutex_unlock(&(cache->mutex));
+        return 0;
+    }
+
+	int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	if(sock == -1){
+		perror("Impossible d'initialiser le socket UNIX");
+		pthread_mutex_unlock(&(cache->mutex));
+		return -1;
+	}
+
+	// Ecriture des parametres du socket
+	struct sockaddr_un sockInfo = {0};
+	sockInfo.sun_family = AF_UNIX;
+	strncpy(sockInfo.sun_path, unixSockPath, sizeof(sockInfo.sun_path) - 1);
+
+	// Connexion
+	if(connect(sock, (const struct sockaddr *) &sockInfo, sizeof(sockInfo)) < 0){
+		perror("Erreur connect");
+        close(sock);
+		pthread_mutex_unlock(&(cache->mutex));
+        return -EIO;	
+	}
+
+	// FDM: 2)  envoyer une requête au serveur pour le télécharger, puis l'insérer dans
+	//		le cache et effectuer l'étape 1).
+	struct msgReq req;
+	req.type = REQ_READ;
+	req.sizePayload = strlen(path) + 1;
+	int octetsTraites = envoyerMessage(sock, &req, (char*)path);
+
+	// On attend et on recoit le fichier demande
+	struct msgRep rep;
+	octetsTraites = read(sock, &rep, sizeof(rep));
+
+	// FDM: 3) le fichier n'existe pas si le rep.sizePayload est 0, on retourne -ENOENT
+	if (rep.sizePayload == 0){
+        close(sock);
+		pthread_mutex_unlock(&(cache->mutex));
+        return -ENOENT; // FDM: /* No such file or directory */
+	}
+
+	if(octetsTraites == -1){
+		perror("Erreur en effectuant un read() sur un socket pret");
+		pthread_mutex_unlock(&(cache->mutex));
+		exit(1);
+	}
+	if(VERBOSE)	
+		printf("Lecture de l'en-tete de la reponse sur le socket %i\n", sock);
+
+
+    file = calloc(1, sizeof(struct cacheFichier));
+    if (!file) {
+        perror("Échec d'allocation du cacheFichier");
+        close(sock);
+		pthread_mutex_unlock(&(cache->mutex));
+        return -ENOMEM;
+    }
+    
+    file->nom = strdup(path);
+    file->data = calloc(rep.sizePayload + 1, sizeof(char));
+    file->len = rep.sizePayload;
+	file->countOpen = 1;
+
+	unsigned int totalRecu = 0;
+
+	while(totalRecu < rep.sizePayload){
+		octetsTraites = read(sock, file->data + totalRecu, rep.sizePayload - totalRecu);
+		totalRecu += octetsTraites;
+	}
+
+	insererFichier(cache, file);
+
+    fi->fh = (uintptr_t) file;
+
+	pthread_mutex_unlock(&(cache->mutex));
+
+    return 0;
 }
 
 
@@ -234,7 +352,30 @@ static int setrfs_open(const char *path, struct fuse_file_info *fi)
 static int setrfs_read(const char *path, char *buf, size_t size, off_t offset,
 		    struct fuse_file_info *fi)
 {
-		// TODO
+	struct fuse_context *context = fuse_get_context();
+	struct cacheData *cache = (struct cacheData*)context->private_data;
+	struct cacheFichier *file = (struct cacheFichier*)(uintptr_t)fi->fh;  
+	 
+	if (!file) {
+        return -ENOENT;
+    }
+
+	pthread_mutex_lock(&(cache->mutex));
+
+    size_t remaining_size = file->len - offset;
+    if (size > remaining_size) {
+        size = remaining_size;
+    }
+
+    // Copier les données du cache vers le buffer (à adapter selon votre mécanisme de cache)
+    memcpy(buf, file->data + offset, size);
+
+    // Mettre à jour le pointeur de position dans le fichier
+    file->offset += size;
+	pthread_mutex_unlock(&(cache->mutex));
+
+
+    return size;
 }
 
 
@@ -243,8 +384,31 @@ static int setrfs_read(const char *path, char *buf, size_t size, off_t offset,
 // utilisée pour stocker ce fichier (pensez au buffer contenant son cache, son nom, etc.)
 static int setrfs_release(const char *path, struct fuse_file_info *fi)
 {
-		// TODO
+	struct fuse_context *context = fuse_get_context();
+	struct cacheData *cache = (struct cacheData*)context->private_data;
+	struct cacheFichier *file = (struct cacheFichier*)(uintptr_t)fi->fh;   
+
+    if (!file) {
+        return -ENOENT;
+    }
+
+    pthread_mutex_lock(&(cache->mutex));  // Lock before modifying the cache
+
+	if (file->countOpen > 1)
+	{
+		incrementerCompteurFichier(cache, path, -1);
+	}
+	else
+	{
+    	retirerFichier(cache, file);
+	}
+
+    pthread_mutex_unlock(&(cache->mutex));  // Unlock after modification
+
+    return 0;  // Return success
+
 }
+
 
 
 ///////////////////////////////////////

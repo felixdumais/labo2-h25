@@ -1,0 +1,14 @@
+- Quand tu call select tu es en IOWAIT
+- Si des données arrivent, il va regarder s'il y a des process qui attendent le data.
+- Ordonanceur ne sait quand les process sont bloqués ou pas. Il sait juste s'ils sont prêt ou pas
+- Voir select vs poll 
+
+31 janvier 2025:
+
+Notes 
+
+Questions:
+
+- pas certain de comprendre ce qu'on doit retourner quand le serveur n'est pas parti
+- quand il y a plusieurs accès ça ne semble pas être full parallèle
+- 
