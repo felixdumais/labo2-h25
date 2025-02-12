@@ -302,7 +302,7 @@ static int setrfs_open(const char *path, struct fuse_file_info *fi)
 		printf("Lecture de l'en-tete de la reponse sur le socket %i\n", sock);
 
 
-    file = malloc(sizeof(struct cacheFichier));
+    file = calloc(1, sizeof(struct cacheFichier));
     if (!file) {
         perror("Échec d'allocation du cacheFichier");
         close(sock);

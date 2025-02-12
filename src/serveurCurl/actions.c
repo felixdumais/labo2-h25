@@ -98,6 +98,12 @@ int traiterConnexions(struct requete reqList[], int maxlen){
     if(maxFileDescriptorPlusOne){
         // Au moins un socket est en attente d'une requête
         // select attend comme premier argument le descripteur de fichier ayant la valeur maximale plus 1
+        // FDM:
+        //     select()  allows  a program to monitor multiple file descriptors, waiting until one or more of the file descriptors become "ready"
+        //    for some class of I/O operation (e.g., input possible).  A file descriptor is considered ready if it is possible to perform a cor‐
+        //    responding I/O operation (e.g., read(2), or a sufficiently small write(2)) without blocking.
+        //        nfds   This argument should be set to the highest-numbered file descriptor in any of the three sets, plus 1.  The  indicated  file
+        //   descriptors in each set are checked, up to this limit (but see BUGS).
         int s = select(maxFileDescriptorPlusOne, &setSockets, NULL, NULL, &tInfo);
         if(s > 0){
             // Au moins un socket est prêt à être lu
@@ -165,6 +171,7 @@ int traiterConnexions(struct requete reqList[], int maxlen){
                         // FDM: On ferme la connexion
                         close(pipefd[1]);
 
+
                         exit(0); 
                     } else { 
                         printf("traiterConnexion(): Je suis le PID %d\n", pid);
@@ -220,7 +227,7 @@ int traiterTelechargements(struct requete reqList[], int maxlen){
 
     // TODO
 
-    int octetsTraites = 0;
+    int counter = 0;
 
     fd_set setPipes;
     struct timeval tInfo;
@@ -275,9 +282,8 @@ int traiterTelechargements(struct requete reqList[], int maxlen){
                         if (lectureCourante == -1) {
                             perror("Erreur lors de la lecture du contenu depuis le pipe");
                             free(reqList[i].buf);
-                            close(reqList[i].fdPipe);
-                            // reqList[i].status = REQ_STATUS_ERROR;
-                            continue;
+                            lectureCourante = 0;
+                            break;
                         }
                         lectureTotale += lectureCourante;
                     }
@@ -295,11 +301,14 @@ int traiterTelechargements(struct requete reqList[], int maxlen){
                         printf("Téléchargement terminé pour le PID : %d\n", reqList[i].pid);
                         printf("Taille du fichier téléchargé : %d octets\n", reqList[i].len);
                     }
-                    octetsTraites++;
+                    if (lectureTotale > 0)
+                    {
+                        counter++;
+                    }
                 }
             }
         }
     }
 
-    return octetsTraites;
+    return counter;
 }
